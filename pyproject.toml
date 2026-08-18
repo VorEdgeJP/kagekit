@@ -1,0 +1,74 @@
+# Packaging metadata for discord-kagekit.
+#
+# The export script copies this next to the split-out package, which is the only place
+# it takes effect. It is kept away from the package source on purpose: a pyproject.toml
+# beside the modules hijacks ruff's and mypy's config discovery for that directory.
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "discord-kagekit"
+version = "0.1.0"
+description = "A declarative UI framework for discord.py Components V2 — cards, tabs, pagers, and a layout contract you cannot write wrong."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [{ name = "VorEdge" }]
+keywords = ["discord", "discord.py", "components-v2", "ui", "layout"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Framework :: AsyncIO",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
+dependencies = ["discord.py>=2.7"]
+
+[project.urls]
+Homepage = "https://github.com/VorEdgeJP/kagekit"
+Source = "https://github.com/VorEdgeJP/kagekit"
+Issues = "https://github.com/VorEdgeJP/kagekit/issues"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6", "mypy>=1.11"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["kagekit"]
+
+[tool.hatch.build.targets.sdist]
+include = ["kagekit", "tests", "README.md", "LICENSE", "CHANGELOG.md"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+# The same baseline the upstream project uses.
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP"]
+ignore = ["E501", "E701", "B008", "UP007", "UP035", "UP045"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F401", "F841", "B007"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+
+# builder.py and embed.py are thin wrappers over the Components V2 primitives and
+# pass **kwargs through to discord.py, so they are not fully typed yet — inherited when
+# the package was split out. The typed surface is page.py / theme.py / tokens.py; these
+# two are being cleaned up gradually.
+[[tool.mypy.overrides]]
+module = ["kagekit.builder", "kagekit.embed"]
+ignore_errors = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# Narrow the test paths so pytest does not try to collect the package itself.
+testpaths = ["tests"]
