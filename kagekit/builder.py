@@ -118,7 +118,19 @@ class ComponentBuilder:
         Switching a plain message to a ``LayoutView`` hits the Components V2 restriction
         unless the existing content, embed and attachments are cleared explicitly; that
         is handled here.
+
+        discord.py's ``edit_message`` drops the synced view for ``MESSAGE_UPDATE`` refresh
+        but does not ``stop()`` the previous view. Each ``Page.build()`` issues new
+        ``custom_id`` values, so leaving the old view registered leaks dispatch entries.
+        Stop it before delegating to ``edit_message`` (which calls
+        ``prevent_view_updates_for`` again — a no-op once tracking is cleared).
         """
+        message = interaction.message
+        if message is not None:
+            old_view = interaction._state.prevent_view_updates_for(message.id)
+            if old_view is not None:
+                old_view.stop()
+
         kwargs = {"view": view}
         if ComponentBuilder.is_components_v2_view(view):
             kwargs.update({"content": None, "embed": None, "attachments": []})
