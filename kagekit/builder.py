@@ -122,37 +122,38 @@ class ComponentBuilder:
         discord.py's ``edit_message`` drops the synced view for ``MESSAGE_UPDATE`` refresh
         but does not ``stop()`` the previous view. Each ``Page.build()`` issues new
         ``custom_id`` values, so leaving the old view registered leaks dispatch entries.
-        Stop the previous view **before** ``edit_message`` when it is a different instance
-        (``stop()`` after a successful edit would call ``remove_view`` and drop the *new*
-        view's message tracking). ``edit_message`` then calls
-        ``prevent_view_updates_for`` again — a no-op once tracking is cleared.
+        The previous view is therefore stopped once the edit has succeeded, so a failed
+        edit leaves the old buttons working.
 
-        Uses ``interaction._state.prevent_view_updates_for`` (discord.py 2.7.x private
-        API; tied to that release's ViewStore behaviour).
+        ``stop()`` goes through ``ViewStore.remove_view``, which also drops the message
+        tracking for this message id — tracking the new view now owns — so the new view
+        is stored again straight afterwards. Re-editing with the same ``view`` instance
+        never stops it.
 
-        If ``edit_message`` fails after a *different* old view was stopped, that old view
-        cannot be re-registered and the message may stay without working buttons until
-        the panel is redrawn successfully. Re-editing with the same ``view`` instance is
-        not stopped, so a failed edit can be recovered via ``store_view`` below.
+        Uses ``interaction._state.prevent_view_updates_for`` / ``store_view`` (discord.py
+        2.7.x private API; tied to that release's ViewStore behaviour).
         """
+        state = interaction._state
         message = interaction.message
-        old_view = None
-        stopped_previous = False
-        if message is not None:
-            old_view = interaction._state.prevent_view_updates_for(message.id)
-            if old_view is not None and old_view is not view:
-                old_view.stop()
-                stopped_previous = True
+        old_view = state.prevent_view_updates_for(message.id) if message is not None else None
 
         kwargs = {"view": view}
         if ComponentBuilder.is_components_v2_view(view):
             kwargs.update({"content": None, "embed": None, "attachments": []})
         try:
-            return await interaction.response.edit_message(**kwargs)
+            result = await interaction.response.edit_message(**kwargs)
         except Exception:
-            if message is not None and old_view is not None and not stopped_previous:
-                interaction._state.store_view(old_view, message.id)
+            # The message still shows the old view: put its tracking back.
+            if old_view is not None:
+                state.store_view(old_view, message.id)
             raise
+
+        if old_view is not None and old_view is not view:
+            old_view.stop()
+            # Same condition edit_message used to decide whether to store the new view.
+            if view and not view.is_finished() and view.is_dispatchable():
+                state.store_view(view, message.id)
+        return result
 
     def _flush_container(self) -> None:
         """Close the container being assembled and push it onto the top level."""

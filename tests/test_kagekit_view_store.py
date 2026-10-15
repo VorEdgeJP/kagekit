@@ -1,141 +1,141 @@
-"""ViewStore hygiene when panels are edited in place."""
+"""ViewStore hygiene when panels are edited in place.
+
+These go through discord.py's real ``InteractionResponse.edit_message`` with only the
+HTTP call mocked, so a change in discord.py's view bookkeeping shows up here.
+"""
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from unittest import mock
 
+import discord
 import pytest
-from discord.ui.view import ViewStore
+from discord.webhook import async_ as webhook_async
 
-from kagekit import ActionBar, Card, ComponentBuilder, Page, SettingRow
+from kagekit import Action, ActionBar, Actions, Card, ComponentBuilder, Page, SettingRow
+
+MESSAGE_ID = 4242
 
 
 async def noop(interaction, *args):
     return None
 
 
-def _small_page(label: str = "A") -> Page:
-    return Page(
-        body=[
-            Card(
-                children=[
-                    SettingRow("Key", label, action="Change", on_click=noop),
-                ],
-            )
-        ],
-        actions=ActionBar(on_close=noop),
-    )
+def _small_page(label: str = "A", *, fixed_custom_id: str | None = None) -> Page:
+    children = [SettingRow("Key", label, action="Change", on_click=noop)]
+    if fixed_custom_id is not None:
+        children.append(Actions([Action("Fixed", on_click=noop, custom_id=fixed_custom_id)]))
+    return Page(body=[Card(children=children)], actions=ActionBar(on_close=noop))
 
 
-def _dispatch_view_count(store: ViewStore, message_id: int) -> tuple[int, int]:
-    bucket = store._views.get(message_id, {})
-    view_ids = {id(item.view) for item in bucket.values() if item.view is not None}
-    return len(bucket), len(view_ids)
+def _interaction(state, n: int) -> discord.Interaction:
+    user = {"id": "555", "username": "u", "discriminator": "0", "avatar": None}
+    message = {
+        "id": str(MESSAGE_ID), "channel_id": "222", "type": 0, "content": "",
+        "author": {"id": "333", "username": "bot", "discriminator": "0", "avatar": None},
+        "attachments": [], "embeds": [], "mentions": [], "mention_roles": [],
+        "pinned": False, "mention_everyone": False, "tts": False,
+        "timestamp": "2026-01-01T00:00:00+00:00", "edited_timestamp": None,
+        "flags": 1 << 15, "components": [],
+    }  # fmt: skip
+    data = {
+        "id": str(900000 + n), "application_id": "444", "type": 3, "token": "tok",
+        "version": 1, "channel_id": "222", "message": message, "user": user,
+        "data": {"component_type": 2, "custom_id": "x"},
+        "locale": "en-US", "app_permissions": "0", "entitlements": [],
+        "authorizing_integration_owners": {}, "attachment_size_limit": 0,
+    }  # fmt: skip
+    return discord.Interaction(data=data, state=state)
 
 
-@pytest.mark.asyncio
-async def test_edit_interaction_response_stops_previous_view():
-    """Repeated Page edits must not accumulate views in discord.py's ViewStore."""
-    message_id = 4242
-    store = ViewStore(state=None)
-    state = SimpleNamespace(
-        prevent_view_updates_for=store.remove_message_tracking,
-        store_view=store.add_view,
-    )
+@pytest.fixture
+async def client():
+    client = discord.Client(intents=discord.Intents.none())
+    yield client
+    await client.close()
 
-    class _Message:
-        id = message_id
 
-    class _Response:
-        async def edit_message(self, **kwargs):
-            # Mirror InteractionResponse.edit_message view bookkeeping (2.7.x).
-            view = kwargs.get("view")
-            state.prevent_view_updates_for(message_id)
-            if view and not view.is_finished() and view.is_dispatchable():
-                state.store_view(view, message_id)
+@pytest.fixture
+def http_ok():
+    async def respond(self, *args, **kwargs):
+        return {"interaction": {"id": "1", "type": 3}}
 
-    interaction = SimpleNamespace(message=_Message(), _state=state, response=_Response())
+    with mock.patch.object(
+        webhook_async.AsyncWebhookAdapter, "create_interaction_response", respond
+    ):
+        yield
 
-    first = _small_page("0").build()
-    store.add_view(first, message_id)
+
+def _dispatch(store) -> dict:
+    return store._views.get(MESSAGE_ID, {})
+
+
+def _routable(store, view: discord.ui.LayoutView) -> bool:
+    keys = [
+        (item.type.value, item.custom_id) for item in view.walk_children() if item.is_dispatchable()
+    ]
+    return all(_dispatch(store).get(key) is not None for key in keys)
+
+
+async def test_repeated_edits_do_not_accumulate_views(client, http_ok):
+    state = client._connection
+    store = state._view_store
 
     for i in range(1, 51):
-        await ComponentBuilder.edit_interaction_response(interaction, _small_page(str(i)).build())
+        view = _small_page(str(i)).build()
+        await ComponentBuilder.edit_interaction_response(_interaction(state, i), view)
 
-    entries, views = _dispatch_view_count(store, message_id)
-    assert views == 1
-    assert entries == 2  # SettingRow button + ActionBar close
+    bucket = _dispatch(store)
+    assert {id(item.view) for item in bucket.values()} == {id(view)}
+    assert len(bucket) == 2  # SettingRow button + ActionBar close
+    assert store._synced_message_views[MESSAGE_ID] is view
+    assert _routable(store, view)
 
 
-@pytest.mark.asyncio
-async def test_edit_reuses_same_view_instance_without_stopping_it():
-    """ComponentBuilder callers may pass the same LayoutView to edit again."""
-    message_id = 9001
-    store = ViewStore(state=None)
-    state = SimpleNamespace(
-        prevent_view_updates_for=store.remove_message_tracking,
-        store_view=store.add_view,
-    )
-
-    class _Message:
-        id = message_id
-
-    class _Response:
-        async def edit_message(self, **kwargs):
-            view = kwargs.get("view")
-            state.prevent_view_updates_for(message_id)
-            if view and not view.is_finished() and view.is_dispatchable():
-                state.store_view(view, message_id)
-
-    interaction = SimpleNamespace(message=_Message(), _state=state, response=_Response())
-
+async def test_reediting_with_the_same_view_keeps_it_alive(client, http_ok):
+    state = client._connection
+    store = state._view_store
     view = _small_page("same").build()
-    store.add_view(view, message_id)
 
-    await ComponentBuilder.edit_interaction_response(interaction, view)
-    await ComponentBuilder.edit_interaction_response(interaction, view)
+    await ComponentBuilder.edit_interaction_response(_interaction(state, 1), view)
+    await ComponentBuilder.edit_interaction_response(_interaction(state, 2), view)
 
     assert not view.is_finished()
-    entries, views = _dispatch_view_count(store, message_id)
-    assert views == 1
-    assert entries == 2
+    assert store._synced_message_views[MESSAGE_ID] is view
+    assert _routable(store, view)
 
 
-@pytest.mark.asyncio
-async def test_edit_failure_restores_sync_when_same_view_not_stopped():
-    message_id = 9002
-    store = ViewStore(state=None)
-    state = SimpleNamespace(
-        prevent_view_updates_for=store.remove_message_tracking,
-        store_view=store.add_view,
-    )
+async def test_failed_edit_leaves_the_old_buttons_working(client, http_ok):
+    state = client._connection
+    store = state._view_store
+    old = _small_page("old").build()
+    await ComponentBuilder.edit_interaction_response(_interaction(state, 1), old)
 
-    class _Message:
-        id = message_id
+    async def fail(self, *args, **kwargs):
+        raise RuntimeError("edit failed")
 
-    calls = {"n": 0}
+    with mock.patch.object(webhook_async.AsyncWebhookAdapter, "create_interaction_response", fail):
+        with pytest.raises(RuntimeError, match="edit failed"):
+            await ComponentBuilder.edit_interaction_response(
+                _interaction(state, 2), _small_page("new").build()
+            )
 
-    class _Response:
-        async def edit_message(self, **kwargs):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise RuntimeError("edit failed")
-            view = kwargs.get("view")
-            state.prevent_view_updates_for(message_id)
-            if view and not view.is_finished() and view.is_dispatchable():
-                state.store_view(view, message_id)
+    assert not old.is_finished()
+    assert store._synced_message_views[MESSAGE_ID] is old
+    assert _routable(store, old)
 
-    interaction = SimpleNamespace(message=_Message(), _state=state, response=_Response())
 
-    view = _small_page("x").build()
-    store.add_view(view, message_id)
+async def test_a_custom_id_shared_across_builds_stays_routable(client, http_ok):
+    # Stopping the old view removes its keys; a fixed custom_id is a key the new view
+    # shares, so it must be routed to the new view afterwards, not dropped.
+    state = client._connection
+    store = state._view_store
+    old = _small_page("old", fixed_custom_id="panel:fixed").build()
+    new = _small_page("new", fixed_custom_id="panel:fixed").build()
 
-    with pytest.raises(RuntimeError, match="edit failed"):
-        await ComponentBuilder.edit_interaction_response(interaction, view)
+    await ComponentBuilder.edit_interaction_response(_interaction(state, 1), old)
+    await ComponentBuilder.edit_interaction_response(_interaction(state, 2), new)
 
-    assert store._synced_message_views.get(message_id) is view
-
-    await ComponentBuilder.edit_interaction_response(interaction, view)
-    entries, views = _dispatch_view_count(store, message_id)
-    assert views == 1
-    assert entries == 2
+    assert old.is_finished()
+    assert _routable(store, new)
+    assert _dispatch(store)[(2, "panel:fixed")].view is new
