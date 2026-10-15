@@ -118,11 +118,41 @@ class ComponentBuilder:
         Switching a plain message to a ``LayoutView`` hits the Components V2 restriction
         unless the existing content, embed and attachments are cleared explicitly; that
         is handled here.
+
+        discord.py's ``edit_message`` drops the synced view for ``MESSAGE_UPDATE`` refresh
+        but does not ``stop()`` the previous view. Each ``Page.build()`` issues new
+        ``custom_id`` values, so leaving the old view registered leaks dispatch entries.
+        Stop the previous view **before** ``edit_message`` when it is a different instance
+        (``stop()`` after a successful edit would call ``remove_view`` and drop the *new*
+        view's message tracking). ``edit_message`` then calls
+        ``prevent_view_updates_for`` again — a no-op once tracking is cleared.
+
+        Uses ``interaction._state.prevent_view_updates_for`` (discord.py 2.7.x private
+        API; tied to that release's ViewStore behaviour).
+
+        If ``edit_message`` fails after a *different* old view was stopped, that old view
+        cannot be re-registered and the message may stay without working buttons until
+        the panel is redrawn successfully. Re-editing with the same ``view`` instance is
+        not stopped, so a failed edit can be recovered via ``store_view`` below.
         """
+        message = interaction.message
+        old_view = None
+        stopped_previous = False
+        if message is not None:
+            old_view = interaction._state.prevent_view_updates_for(message.id)
+            if old_view is not None and old_view is not view:
+                old_view.stop()
+                stopped_previous = True
+
         kwargs = {"view": view}
         if ComponentBuilder.is_components_v2_view(view):
             kwargs.update({"content": None, "embed": None, "attachments": []})
-        return await interaction.response.edit_message(**kwargs)
+        try:
+            return await interaction.response.edit_message(**kwargs)
+        except Exception:
+            if message is not None and old_view is not None and not stopped_previous:
+                interaction._state.store_view(old_view, message.id)
+            raise
 
     def _flush_container(self) -> None:
         """Close the container being assembled and push it onto the top level."""
