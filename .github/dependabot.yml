@@ -1,0 +1,18 @@
+version: 2
+
+# Keep GitHub Actions up to date. Actions are pinned to commit SHAs, so Dependabot
+# rewrites both the SHA and the trailing "# vX.Y.Z" comment.
+#
+# Updates are grouped into a single PR to avoid PR spam.
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      actions:
+        patterns:
+          - "*"
